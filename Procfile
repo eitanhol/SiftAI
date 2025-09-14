@@ -1,1 +1,1 @@
-web: uvicorn main:app --host 0.0.0.0 --port $PORT
+web: doppler run -- gunicorn main:app --workers=4 --bind=0.0.0.0:$PORT
