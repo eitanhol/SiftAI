@@ -1,1 +1,1 @@
-web: doppler run -- gunicorn main:app --workers=4 --bind=0.0.0.0:$PORT
+web: doppler run -- python3 main.py
