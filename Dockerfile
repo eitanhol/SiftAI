@@ -1,4 +1,4 @@
-# Use a base image with both Node.js and Python installed
+# Use a base image with Python installed
 FROM python:3.13-bullseye
 
 # Install Node.js
@@ -22,7 +22,6 @@ COPY DataAnalyzer/main.py ./DataAnalyzer/
 COPY DataAnalyzer/demo.py ./DataAnalyzer/
 COPY DataAnalyzer/runner.py ./DataAnalyzer/
 COPY DataAnalyzer/script.py ./DataAnalyzer/
-
 
 # Set the working directory to the app folder and install dependencies
 WORKDIR /app/DataAnalyzer
