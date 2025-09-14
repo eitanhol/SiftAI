@@ -1,0 +1,795 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Sift AI</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body { font-family: 'Inter', sans-serif; }
+    .drag-over { border-color: #3b82f6; background-color: #eff6ff; }
+    .tab-active { border-bottom: 2px solid #2563eb; color: #2563eb; font-weight: 600; }
+    #viz-wrapper { position: relative; height: 60vh; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+  </style>
+</head>
+<body class="bg-gray-100 min-h-screen py-10">
+  <div class="max-w-6xl mx-auto px-4">
+    <div id="main-card" class="bg-white rounded-2xl shadow-lg p-8">
+      <div id="main-content">
+        <div id="upload-view" class="text-center">
+          <h1 class="text-3xl font-bold text-gray-800">Sift AI</h1>
+          <p class="text-gray-500 mt-2">Upload a file to automatically infer its schema and generate a statistical deep-dive.</p>
+
+          <div id="drop-zone" class="mt-8 border-2 border-dashed border-gray-300 rounded-xl p-10 cursor-pointer hover:border-blue-500 hover:bg-blue-50 transition-all duration-300">
+            <input type="file" id="file-input" class="hidden" accept=".csv,.xls,.xlsx">
+            <div class="flex flex-col items-center space-y-4 pointer-events-none">
+              <svg class="w-16 h-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 16.5V9.75m0 0l-3.75 3.75M12 9.75l3.75 3.75M3 17.25V6.75A2.25 2.25 0 015.25 4.5h13.5A2.25 2.25 0 0121 6.75v10.5A2.25 2.25 0 0118.75 19.5H5.25A2.25 2.25 0 013 17.25z" /></svg>
+              <p class="text-gray-600 font-medium"><span class="text-blue-600">Click to upload</span> or drag and drop</p>
+              <p class="text-xs text-gray-500">CSV, XLS, XLSX accepted. Max 50MB.</p>
+            </div>
+          </div>
+
+          <div id="status-container" class="mt-6 text-sm"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Persist the workspace for this tab only (clears when tab closes)
+    window.__workspaceId = sessionStorage.getItem('sift_ws') || null;
+
+    const dropZone = document.getElementById('drop-zone');
+    const fileInput = document.getElementById('file-input');
+    const statusContainer = document.getElementById('status-container');
+    const mainContent = document.getElementById('main-content');
+
+    // Register cleanup once we have a workspace id
+    function registerWorkspaceCleanup(wsId) {
+      if (window.__wsCleanupRegistered) return;
+      const sendClose = () => {
+        try {
+          const id = sessionStorage.getItem('sift_ws');
+          if (!id) return;
+          const blob = new Blob([JSON.stringify({ workspace_id: id })], { type: 'application/json' });
+          navigator.sendBeacon('/workspace/close', blob);
+          sessionStorage.removeItem('sift_ws');
+        } catch (_) {}
+      };
+      // Best-effort close on tab/window exit (reload will also close, which is fine
+      // since a new upload creates a new workspace).
+      window.addEventListener('beforeunload', sendClose);
+      window.addEventListener('pagehide', sendClose);
+      window.__wsCleanupRegistered = true;
+    }
+
+    // --- Event Listeners ---
+    dropZone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName =>
+      dropZone.addEventListener(eventName, preventDefaults)
+    );
+    ['dragenter', 'dragover'].forEach(eventName =>
+      dropZone.addEventListener(eventName, () => dropZone.classList.add('drag-over'))
+    );
+    ['dragleave', 'drop'].forEach(eventName =>
+      dropZone.addEventListener(eventName, () => dropZone.classList.remove('drag-over'))
+    );
+    dropZone.addEventListener('drop', (e) => {
+      if (e.dataTransfer.files.length > 0) {
+        fileInput.files = e.dataTransfer.files;
+        handleFiles(e.dataTransfer.files);
+      }
+    });
+
+    function preventDefaults(e) { e.preventDefault(); e.stopPropagation(); }
+
+    // --- File Handling ---
+    function handleFiles(files) {
+      if (!files.length) return;
+      const file = files[0];
+      statusContainer.innerHTML = '';
+      if (file.size > 50 * 1024 * 1024) {
+        displayError('File is too large. Maximum size is 50MB.');
+        return removeFile();
+      }
+      displayFileInfo(file);
+    }
+
+    async function uploadFile(file) {
+      const btn = document.getElementById('upload-btn');
+      if (!file || !btn) return;
+      btn.disabled = true;
+      btn.innerHTML = `
+        <svg class="animate-spin -ml-1 mr-3 h-5 w-5 text-white inline" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+          <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+          <path class="opacity-75" fill="CurrentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"></path>
+        </svg>Analyzing...`;
+
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const response = await fetch('/uploadfile/', { method: 'POST', body: formData });
+        if (!response.ok) {
+          let message = 'Analysis failed on the server.';
+          try { const err = await response.json(); message = err.detail || message; } catch {}
+          throw new Error(message);
+        }
+        const data = await response.json();
+
+        // Save & keep workspace for this tab until it closes
+        if (data.workspace_id) {
+          window.__workspaceId = data.workspace_id;
+          sessionStorage.setItem('sift_ws', data.workspace_id);
+          registerWorkspaceCleanup(data.workspace_id);
+        }
+
+        displayResults(data);
+      } catch (error) {
+        displayError(`An error occurred: ${error.message}`);
+        btn.disabled = false;
+        btn.innerHTML = 'Analyze File';
+      }
+    }
+
+    function removeFile() { fileInput.value = ''; statusContainer.innerHTML = ''; }
+
+    // --- UI Rendering ---
+    function displayFileInfo(file) {
+      statusContainer.innerHTML = `
+        <div class="bg-gray-50 border rounded-lg p-4 flex justify-between items-center text-left">
+          <div>
+            <p class="font-medium text-gray-800">${file.name}</p>
+            <p class="text-gray-500 text-sm">${formatBytes(file.size)}</p>
+          </div>
+          <button onclick="removeFile()" class="text-gray-400 hover:text-gray-600 transition" aria-label="Remove file">✕</button>
+        </div>
+        <button id="upload-btn" onclick="uploadFile(fileInput.files[0])"
+          class="mt-4 w-full bg-blue-600 text-white font-semibold py-3 px-6 rounded-lg hover:bg-blue-700 transition duration-300 shadow-sm hover:shadow-md">
+          Analyze File
+        </button>`;
+    }
+    function _collectKeysFromRows(rows) {
+  const ks = new Set();
+  rows.forEach(r => {
+    if (r && typeof r === 'object' && !Array.isArray(r)) {
+      Object.keys(r).forEach(k => ks.add(k));
+    }
+  });
+  return [...ks];
+}
+
+function normalizeDataGrid(dataObj) {
+  // Accept a few shapes:
+  // 1) { columns: [string|object], rows: [array|object] }
+  // 2) { rows: [object] }  -> derive columns from keys
+  // 3) { data: [...] }     -> if passed a nested shape accidentally
+  const d = (dataObj && dataObj.data) ? dataObj.data : dataObj || {};
+  let cols = [];
+  let rows = Array.isArray(d.rows) ? d.rows.slice() : [];
+
+  // Columns
+  if (Array.isArray(d.columns) && d.columns.length) {
+    if (typeof d.columns[0] === 'string') {
+      cols = d.columns.slice();
+    } else if (typeof d.columns[0] === 'object' && d.columns[0] !== null) {
+      cols = d.columns.map(c => 
+  c["column-name"] || c.name || c.key || c.label || c.id || String(c)
+);
+
+    }
+  } else if (rows.length && typeof rows[0] === 'object' && !Array.isArray(rows[0])) {
+    cols = _collectKeysFromRows(rows);
+  }
+
+  // Rows → array-of-arrays
+  if (rows.length) {
+    if (Array.isArray(rows[0])) {
+      // Pad/truncate to column count if we have columns
+      if (cols.length) {
+        rows = rows.map(r => {
+          const rr = r.slice(0, cols.length);
+          while (rr.length < cols.length) rr.push(null);
+          return rr;
+        });
+      }
+    } else {
+      // Object rows -> project by columns order
+      rows = rows.map(obj => cols.map(k => (obj ? obj[k] : null)));
+    }
+  }
+
+  return { columns: cols, rows };
+}
+
+function fmtCell(v) {
+  if (v === null || v === undefined) return '—';
+  if (typeof v === 'number') return v.toLocaleString();
+  if (typeof v === 'boolean') return v ? 'True' : 'False';
+  if (v instanceof Date) return v.toLocaleString();
+  if (Array.isArray(v) || (typeof v === 'object' && v)) {
+    try { return JSON.stringify(v); } catch { return String(v); }
+  }
+  return String(v);
+}
+
+
+    function displayResults(data) {
+      const { summary, schema, analysis } = data;
+      const columnNames = (() => {
+      const keys = Object.keys(analysis || {});
+      if (keys.length) return keys;
+      if (Array.isArray(schema)) {
+        return schema
+          .map(s => s["column-name"] || s["column_name"])
+          .filter(Boolean);
+      }
+      return [];
+    })();
+      const options = columnNames.map(name => `<option value="${name}">${name}</option>`).join('');
+
+      mainContent.innerHTML = `
+        <div class="space-y-8">
+          <div class="bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-2xl font-bold mb-4 text-gray-800">Dataset Overview 📊</h2>
+            <div class="grid grid-cols-2 md:grid-cols-5 gap-4 text-center">
+              <div><p class="text-sm text-gray-500">Rows</p><p class="text-2xl font-bold text-gray-900">${(summary.row_count ?? 0).toLocaleString()}</p></div>
+              <div><p class="text-sm text-gray-500">Columns</p><p class="text-2xl font-bold text-gray-900">${summary.column_count ?? 0}</p></div>
+              <div><p class="text-sm text-gray-500">Duplicates</p><p class="text-2xl font-bold text-gray-900">${(summary.duplicate_rows ?? 0).toLocaleString()}</p></div>
+              <div><p class="text-sm text-gray-500">Missing</p><p class="text-2xl font-bold text-gray-900">${(summary.missing_percentage ?? 0).toFixed(2)}%</p></div>
+              <div><p class="text-sm text-gray-500">Memory Size</p><p class="text-2xl font-bold text-gray-900">${formatBytes(summary.memory_usage ?? 0)}</p></div>
+            </div>
+          </div>
+
+          <div class="bg-white rounded-lg shadow-md p-6">
+            <h2 class="text-2xl font-bold mb-4 text-gray-800">Column Inspector 🔬</h2>
+            <label for="column-selector" 
+       class="block mb-3 text-lg font-semibold text-gray-900 tracking-wide">
+      Select a column to analyze:
+    </label>
+    <select id="column-selector" 
+            class="w-full mb-8 border-2 border-blue-500 rounded-lg p-3 shadow-md bg-white text-gray-800 font-medium focus:ring-2 focus:ring-blue-600 focus:border-blue-600 transition">
+      ${options}
+    </select>
+
+
+            <div class="border-b flex space-x-6 mb-4 justify-center">
+              <button id="tab-stats" class="pb-2 font-medium text-gray-500 hover:text-blue-600 transition">Statistics</button>
+              <button id="tab-chart" class="pb-2 font-medium text-gray-500 hover:text-blue-600 transition">Visualization</button>
+            </div>
+
+            <div id="analysis-output"></div>
+
+            <div id="viz-wrapper" class="hidden mt-6">
+              <div id="plotly-generic" class="w-full h-full"></div>
+            </div>
+            <div id="boxplot-container" class="hidden mt-6"></div>
+          </div>
+
+          <div class="bg-white rounded-lg shadow-md p-6">
+              <h2 class="text-2xl font-bold mb-4 text-gray-800">AI Analyst</h2>
+
+              <div class="grid md:grid-cols-2 gap-4">
+                <div class="md:col-span-2">
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Question</label>
+                  <textarea id="ai-question" rows="3" class="w-full border-2 border-gray-400 bg-gray-50 rounded-md p-3 shadow-sm focus:ring-blue-500 focus:border-blue-500" placeholder="e.g., How many securities are listed on each exchange (Q, N, P, A), and which exchange dominates the dataset?"></textarea>
+                </div>
+
+                <div>
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Output Mode</label>
+                  <div class="flex items-center space-x-4 mt-2">
+                      <label class="flex items-center gap-2">
+                          <input id="ai-output-table" type="checkbox" class="h-4 w-4 rounded text-blue-600 focus:ring-blue-500" checked>
+                          <span class="text-sm text-gray-700">Table</span>
+                      </label>
+                      <label class="flex items-center gap-2">
+                          <input id="ai-output-viz" type="checkbox" class="h-4 w-4 rounded text-blue-600 focus:ring-blue-500" checked>
+                          <span class="text-sm text-gray-700">Visualization</span>
+                      </label>
+                  </div>
+                </div>
+
+                <div class="md:col-span-2 hidden">
+                  <div class="flex items-center gap-4">
+                    <label class="flex items-center gap-2">
+                      <input id="ai-sandbox" type="checkbox" class="h-4 w-4 text-blue-600" checked>
+                      <span class="text-sm text-gray-700">Run in sandbox against data.csv</span>
+                    </label>
+                  </div>
+                </div>
+
+                <div class="md:col-span-2 hidden">
+                  <label class="block text-sm font-medium text-gray-700 mb-1">Params (JSON)</label>
+                  <textarea id="ai-params" rows="3" class="w-full border-gray-300 rounded-md p-3 shadow-sm mono focus:ring-blue-500 focus:border-blue-500">{ "top_n": 20, "include_png": true }</textarea>
+                </div>
+              </div>
+
+            <div class="mt-4 flex gap-3">
+              <button id="ai-run-btn" class="bg-blue-600 text-white font-semibold px-6 py-3 rounded-lg hover:bg-blue-700 transition shadow-sm hover:shadow-md">
+                Run Demo
+              </button>
+              <button id="ai-clear-btn" class="bg-gray-100 text-gray-800 font-semibold px-4 py-3 rounded-lg hover:bg-gray-200 transition">
+                Clear Output
+              </button>
+            </div>
+
+            <div id="ai-run-status" class="mt-4 text-sm"></div>
+
+            <div id="ai-results" class="mt-6 hidden">
+              <div class="space-y-6">
+                <div class="border rounded-lg p-4">
+                  <h3 class="font-semibold text-gray-800 mb-2">Plan Summary</h3>
+                  <pre id="ai-plan" class="mono text-sm whitespace-pre-wrap text-gray-800"></pre>
+                </div>
+                <div id="ai-viz-container" class="border rounded-lg p-4 hidden">
+                  <h3 class="font-semibold text-gray-800 mb-2">Visualization</h3>
+                  <div id="ai-viz"></div>
+                </div>
+                <div class="border rounded-lg p-4 overflow-auto">
+                  <h3 class="font-semibold text-gray-800 mb-2">Table</h3>
+                  <div id="ai-table" class="overflow-auto"></div>
+                </div>
+                <div class="border rounded-lg p-4 overflow-auto">
+                  <h3 class="font-semibold text-gray-800 mb-2">Generated Code</h3>
+                  <pre id="ai-code" class="mono text-sm whitespace-pre-wrap text-gray-800"></pre>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="text-center pt-4">
+            <button onclick="window.location.reload()" class="bg-blue-600 text-white font-semibold px-8 py-3 rounded-lg hover:bg-blue-700 transition duration-300 shadow-sm hover:shadow-md">
+              Analyze Another File
+            </button>
+          </div>
+        </div>`;
+
+      // Wire up column inspector
+      const selector = document.getElementById('column-selector');
+      const tabStats = document.getElementById('tab-stats');
+      const tabChart = document.getElementById('tab-chart');
+
+      selector.addEventListener('change', (e) => {
+        const currentTab = tabStats.classList.contains('tab-active') ? 'stats' : 'chart';
+        const col = e.target.value;
+        if (currentTab === 'stats') {
+          renderAnalysis(col, analysis);
+        } else {
+          renderChart(col, analysis[col]);
+        }
+      });
+      tabStats.addEventListener('click', () => toggleTab('stats', selector.value, analysis));
+      tabChart.addEventListener('click', () => toggleTab('chart', selector.value, analysis));
+      if (columnNames.length > 0) toggleTab('stats', columnNames[0], analysis);
+
+      // Wire up AI runner
+      document.getElementById('ai-run-btn').addEventListener('click', onRunDemo);
+      document.getElementById('ai-clear-btn').addEventListener('click', clearAiOutput);
+    }
+
+    function toggleTab(activeTab, colName, analysis) {
+      const tabStats = document.getElementById('tab-stats');
+      const tabChart = document.getElementById('tab-chart');
+      const analysisOutput = document.getElementById('analysis-output');
+      const vizWrapper = document.getElementById('viz-wrapper');
+      const boxplotContainer = document.getElementById('boxplot-container');
+      const plotlyGeneric = document.getElementById('plotly-generic');
+
+      tabStats.classList.remove('tab-active');
+      tabChart.classList.remove('tab-active');
+
+      analysisOutput.classList.add('hidden');
+      vizWrapper.classList.add('hidden');
+      boxplotContainer.classList.add('hidden');
+      plotlyGeneric.innerHTML = '';
+
+      if (activeTab === 'stats') {
+        tabStats.classList.add('tab-active');
+        analysisOutput.classList.remove('hidden');
+        renderAnalysis(colName, analysis);
+      } else {
+        tabChart.classList.add('tab-active');
+        renderChart(colName, analysis[colName]);
+      }
+    }
+
+    function renderAnalysis(col, analysisData) {
+      const colData = analysisData[col];
+      const output = document.getElementById('analysis-output');
+      if (!colData) { output.innerHTML = ''; return; }
+
+      const badge = `<span class="text-sm bg-blue-100 text-blue-800 px-2 py-1 rounded-full align-middle">${colData.type}</span>`;
+      let html = `<h3 class="font-bold text-lg mb-3">${col} ${badge}</h3>`;
+
+      if (colData.type === 'Numerical') {
+        if (colData.stats) {
+          html += `<div class="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2 text-sm">`;
+          for (const [k,v] of Object.entries(colData.stats)) {
+            const keyName = k.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+            const val = (typeof v === 'number') ? v.toLocaleString(undefined, { maximumFractionDigits: 3 }) : v;
+            html += `<div class="flex justify-between border-b py-1"><span class="text-gray-600">${keyName}</span><strong class="text-gray-800">${val}</strong></div>`;
+          }
+          html += `</div>`;
+        } else {
+          html += `<p class="text-sm text-gray-600">No numerical statistics available.</p>`;
+        }
+
+      } else if (colData.type === 'Categorical') {
+        html += `<div class="text-sm space-y-2 mb-4">
+          <div class="flex justify-between"><span>Unique Values:</span><strong>${(colData.unique_count ?? 0).toLocaleString()} (${(colData.distinct_percent ?? 0).toFixed(1)}%)</strong></div>
+          <div class="flex justify-between"><span>Mode (Most Frequent):</span><strong>${colData.mode ?? '—'}</strong></div>
+          <div class="flex justify-between"><span>High Cardinality:</span><strong>${colData.is_high_cardinality ? 'Yes' : 'No'}</strong></div>
+        </div>`;
+        if (colData.value_counts) {
+          html += "<h4 class='font-semibold mt-4 mb-2'>Top Values</h4><table class='w-full mt-2 border text-sm'><thead class='bg-gray-50'><tr class='text-left'><th class='p-2'>Value</th><th class='p-2'>Count</th><th class='p-2'>Percentage</th></tr></thead><tbody>";
+          for (const [k, v] of Object.entries(colData.value_counts)) {
+            const pct = colData.percentages?.[k] ?? 0;
+            html += `<tr><td class="p-2 border-t">${k}</td><td class="p-2 border-t">${v.toLocaleString()}</td><td class="p-2 border-t">${pct.toFixed(1)}%</td></tr>`;
+          }
+          html += `</tbody></table><p class="text-xs text-gray-500 mt-2">Showing top ${Object.keys(colData.value_counts).length} values.</p>`;
+        }
+
+      } else if (colData.type === 'Temporal') {
+        html += `<div class="text-sm space-y-2">
+          <div class="flex justify-between"><span>Date Range Start:</span><strong>${colData.min_date ? new Date(colData.min_date).toLocaleDateString() : '—'}</strong></div>
+          <div class="flex justify-between"><span>Date Range End:</span><strong>${colData.max_date ? new Date(colData.max_date).toLocaleDateString() : '—'}</strong></div>
+          <div class="flex justify-between"><span>Avg Events per Day:</span><strong>${(colData.avg_events_per_day ?? 0).toFixed(2)}</strong></div>
+          <div class="flex justify-between"><span>Aggregation Level:</span><strong>${colData.aggregation_level ?? '—'}</strong></div>
+        </div>`;
+
+      } else if (colData.type === 'BOOLEAN') {
+        const s = colData.stats || {};
+        html += `<div class="grid grid-cols-2 md:grid-cols-3 gap-x-6 gap-y-2 text-sm">
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">True Count</span><strong class="text-gray-800">${(s.true_count ?? 0).toLocaleString()}</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">False Count</span><strong class="text-gray-800">${(s.false_count ?? 0).toLocaleString()}</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">Missing</span><strong class="text-gray-800">${(s.missing_count ?? 0).toLocaleString()}</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">True % (Total)</span><strong class="text-gray-800">${((s.true_percent_total ?? 0)).toFixed(2)}%</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">False % (Total)</span><strong class="text-gray-800">${((s.false_percent_total ?? 0)).toFixed(2)}%</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">Missing % (Total)</span><strong class="text-gray-800">${((s.missing_percent_total ?? 0)).toFixed(2)}%</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">True Rate (Valid)</span><strong class="text-gray-800">${((s.true_rate_valid ?? 0)).toFixed(2)}%</strong></div>
+          <div class="flex justify-between border-b py-1"><span class="text-gray-600">False Rate (Valid)</span><strong class="text-gray-800">${((s.false_rate_valid ?? 0)).toFixed(2)}%</strong></div>
+        </div>`;
+      }
+
+      output.innerHTML = html;
+    }
+
+    function injectPlotlyHTML(html, container) {
+      container.innerHTML = html;
+      const scripts = container.querySelectorAll('script');
+      scripts.forEach((oldScript) => {
+        const newScript = document.createElement('script');
+        for (const attr of oldScript.attributes) newScript.setAttribute(attr.name, attr.value);
+        if (oldScript.text || oldScript.textContent) {
+          newScript.appendChild(document.createTextNode(oldScript.text || oldScript.textContent));
+        }
+        oldScript.parentNode.replaceChild(newScript, oldScript);
+      });
+
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const plotDiv = container.querySelector('.js-plotly-plot');
+          if (plotDiv) Plotly.Plots.resize(plotDiv);
+        });
+      });
+    }
+
+    function renderChart(col, colData) {
+      if (!colData) return;
+      const vizWrapper = document.getElementById('viz-wrapper');
+      const boxplotContainer = document.getElementById('boxplot-container');
+      const plotlyGeneric = document.getElementById('plotly-generic');
+
+      boxplotContainer.innerHTML = '';
+      plotlyGeneric.innerHTML = '';
+      vizWrapper.classList.add('hidden');
+      boxplotContainer.classList.add('hidden');
+
+      if (colData.type === "Numerical" || colData.type === "BOOLEAN") {
+        const html = colData.viz_html || colData.boxplot_html;
+        const png  = colData.viz_png  || colData.boxplot;
+
+        if (html) {
+          injectPlotlyHTML(html, boxplotContainer);
+          boxplotContainer.classList.remove('hidden');
+          return;
+        }
+        if (png) {
+          const alt = buildAlt(col, colData);
+          boxplotContainer.innerHTML = `<img src="${png}" alt="${alt}" class="rounded-lg border border-gray-200 mx-auto" />`;
+          boxplotContainer.classList.remove('hidden');
+          return;
+        }
+        return;
+      }
+
+      vizWrapper.classList.remove('hidden');
+
+      if (colData.type === "Categorical") {
+        const labels = Object.keys(colData.value_counts || {});
+        const counts = Object.values(colData.value_counts || {});
+        const trace = {
+          type: 'bar', x: counts, y: labels, orientation: 'h', name: 'Count',
+          hovertemplate: 'Value: %{y}<br>Count: %{x}<extra></extra>'
+        };
+        const layout = {
+          autosize: true, template: 'plotly_white',
+          margin: { l: 50, r: 20, t: 40, b: 40 },
+          title: { text: `Distribution for ${col}`, x: 0.01 },
+          xaxis: { title: 'Count', zeroline: false, automargin: true },
+          yaxis: { automargin: true }
+        };
+        Plotly.newPlot(plotlyGeneric, [trace], layout, { displaylogo: false, responsive: true });
+
+      } else if (colData.type === "Temporal") {
+        const labels = Object.keys(colData.time_counts || {});
+        const values = Object.values(colData.time_counts || {});
+        const trace = {
+          type: 'scatter', mode: 'lines+markers', x: labels, y: values,
+          name: `Events (${colData.aggregation_level || ''})`, fill: 'tozeroy',
+          hovertemplate: '%{x}<br>Events: %{y}<extra></extra>'
+        };
+        const layout = {
+          autosize: true, template: 'plotly_white',
+          margin: { l: 60, r: 20, t: 40, b: 50 },
+          title: { text: `Time Series for ${col}`, x: 0.01 },
+          xaxis: { title: 'Time', showspikes: true, spikemode: 'across', ticks: 'outside', automargin: true },
+          yaxis: { title: 'Events', zeroline: false, automargin: true }
+        };
+        Plotly.newPlot(plotlyGeneric, [trace], layout, { displaylogo: false, responsive: true });
+      }
+    }
+
+    function buildAlt(col, colData) {
+      if (colData.type === "Numerical" && colData.stats) {
+        const s = colData.stats;
+        return `Boxplot for ${col}: min ${fmt(s.min)}, Q1 ${fmt(s.q1)}, median ${fmt(s.median)}, Q3 ${fmt(s.q3)}, max ${fmt(s.max)}; mean ${fmt(s.mean)}; IQR ${fmt(s.iqr)}; outliers ${s.outlier_count}`;
+      }
+      if (colData.type === "BOOLEAN" && colData.stats) {
+        const s = colData.stats;
+        return `Boolean distribution for ${col}: true ${fmt(s.true_percent_total)}%, false ${fmt(s.false_percent_total)}%, missing ${fmt(s.missing_percent_total)}%`;
+      }
+      return `Visualization for ${col}`;
+    }
+
+    function fmt(x) {
+      if (x === null || x === undefined) return '—';
+      if (typeof x === 'number') return x.toLocaleString(undefined, { maximumFractionDigits: 3 });
+      return String(x);
+    }
+
+    // ---------- AI Runner handlers ----------
+    function clearAiOutput() {
+      document.getElementById('ai-run-status').innerHTML = '';
+      document.getElementById('ai-results').classList.add('hidden');
+      document.getElementById('ai-plan').textContent = '';
+      document.getElementById('ai-viz').innerHTML = '';
+      document.getElementById('ai-table').innerHTML = '';
+    }
+
+    function showAiStatus(html) {
+      const box = document.getElementById('ai-run-status');
+      box.innerHTML = html;
+    }
+
+    function parseJSONSafe(text, fallback) {
+      try {
+        return text ? JSON.parse(text) : fallback;
+      } catch (e) {
+        throw new Error("Params JSON is invalid.");
+      }
+    }
+
+    async function onRunDemo() {
+      const btn = document.getElementById('ai-run-btn');
+      const question = (document.getElementById('ai-question').value || '').trim();
+      const wantsTable = document.getElementById('ai-output-table').checked;
+      const wantsViz = document.getElementById('ai-output-viz').checked;
+      const sandbox = document.getElementById('ai-sandbox').checked;
+      let params;
+
+      if (!window.__workspaceId) {
+        showAiStatus(`<div class="bg-yellow-50 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg">Please upload and analyze a file first.</div>`);
+        return;
+      }
+
+      let output;
+      if (wantsTable && wantsViz) {
+        output = 'both';
+      } else if (wantsTable) {
+        output = 'table';
+      } else if (wantsViz) {
+        output = 'viz';
+      } else {
+        showAiStatus(`<div class="bg-yellow-50 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg">Please select at least one output mode (Table or Visualization).</div>`);
+        return;
+      }
+
+      try {
+        params = parseJSONSafe(document.getElementById('ai-params').value, {});
+      } catch (e) {
+        showAiStatus(`<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg">${e.message}</div>`);
+        return;
+      }
+
+      if (!question) {
+        showAiStatus(`<div class="bg-yellow-50 border border-yellow-400 text-yellow-800 px-4 py-3 rounded-lg">Please enter a question.</div>`);
+        return;
+      }
+
+      btn.disabled = true;
+      showAiStatus(`
+        <div class="flex items-center gap-2 text-blue-700 bg-blue-50 border border-blue-200 rounded-lg px-3 py-2">
+          <svg class="animate-spin h-4 w-4 text-blue-600" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0"/></svg>
+          Running demo...
+        </div>
+      `);
+
+      try {
+        const resp = await fetch('/demo/run', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            question, output, sandbox, params, timeout_sec: 900,
+            workspace_id: window.__workspaceId
+          })
+        });
+
+        const data = await resp.json().catch(() => ({}));
+        if (!resp.ok) {
+          const msg = (data && data.detail) ? data.detail : `Server error (${resp.status})`;
+          throw new Error(msg);
+        }
+
+        renderAiResponse(data);
+        btn.disabled = false;
+        showAiStatus(`<div class="bg-green-50 border border-green-200 text-green-800 px-4 py-3 rounded-lg">Done in ${Number(data.duration_sec || 0).toFixed(2)}s (exit ${data.returncode}).</div>`);
+      } catch (e) {
+        btn.disabled = false;
+        showAiStatus(`<div class="bg-red-50 border border-red-200 text-red-800 px-4 py-3 rounded-lg">Failed: ${e.message}</div>`);
+      }
+    }
+
+    function renderAiResponse(payload) {
+      const wrap = document.getElementById('ai-results');
+      const planEl = document.getElementById('ai-plan');
+      const vizContainer = document.getElementById('ai-viz-container');
+      const vizEl = document.getElementById('ai-viz');
+      const tableEl = document.getElementById('ai-table');
+
+      wrap.classList.remove('hidden');
+
+      // Plan summary
+      const plan = payload.plan || {};
+      const planSummary = (typeof plan.summary === 'string') ? plan.summary : JSON.stringify(plan, null, 2);
+      planEl.textContent = planSummary || '(no plan received)';
+
+      // Viz
+      vizEl.innerHTML = '';
+      vizContainer.classList.add('hidden');
+      const result = payload.result || {};
+      const png64 = result?.viz?.png_base64;
+      if (png64) {
+        const img = document.createElement('img');
+        img.src = `data:image/png;base64,${png64}`;
+        img.alt = 'Generated visualization';
+        img.className = 'rounded-lg border border-gray-200 w-full h-auto';
+        vizEl.appendChild(img);
+        vizContainer.classList.remove('hidden');
+      }
+
+      // Table
+      tableEl.innerHTML = '';
+      const { columns: cols, rows } = normalizeDataGrid(payload.result ? payload.result.data : {});
+
+      if (Array.isArray(cols) && cols.length) {
+        let sortState = { colIndex: -1, dir: 'asc' };
+        const table = document.createElement('table');
+        table.className = 'w-full text-sm border';
+
+        const thead = document.createElement('thead');
+        thead.className = 'bg-gray-50';
+        const trh = document.createElement('tr');
+        const tbody = document.createElement('tbody');
+
+        const populateTbody = (currentRows) => {
+          tbody.innerHTML = '';
+          currentRows.forEach(r => {
+            const tr = document.createElement('tr');
+            (Array.isArray(r) ? r : [r]).forEach(cell => {
+              const td = document.createElement('td');
+              td.className = 'p-2 border-t align-top break-all';
+              td.textContent = fmtCell(cell);
+              tr.appendChild(td);
+            });
+            tbody.appendChild(tr);
+          });
+        };
+
+        const sortTable = (clickedIndex) => {
+          if (sortState.colIndex === clickedIndex) {
+            sortState.dir = sortState.dir === 'asc' ? 'desc' : 'asc';
+          } else {
+            sortState.colIndex = clickedIndex;
+            sortState.dir = 'asc';
+          }
+          
+          const dirMultiplier = sortState.dir === 'asc' ? 1 : -1;
+          const sampleValue = rows[0]?.[clickedIndex];
+          const isNumeric = typeof sampleValue === 'number';
+
+          rows.sort((a, b) => {
+            const valA = a[sortState.colIndex];
+            const valB = b[sortState.colIndex];
+
+            if (isNumeric) {
+              return (valA - valB) * dirMultiplier;
+            }
+            return String(valA).localeCompare(String(valB)) * dirMultiplier;
+          });
+
+          // Update sort indicators
+          Array.from(trh.children).forEach((th, i) => {
+            const indicator = th.querySelector('.sort-indicator');
+            if (i === sortState.colIndex) {
+              indicator.textContent = sortState.dir === 'asc' ? ' ▲' : ' ▼';
+            } else {
+              indicator.textContent = '';
+            }
+          });
+
+          populateTbody(rows);
+        };
+
+        cols.forEach((c, index) => {
+          const th = document.createElement('th');
+          th.className = 'p-2 text-left border-b cursor-pointer hover:bg-gray-200 transition-colors select-none';
+          th.textContent = typeof c === 'string' ? c : String(c);
+          
+          const indicator = document.createElement('span');
+          indicator.className = 'sort-indicator';
+          th.appendChild(indicator);
+
+          th.addEventListener('click', () => sortTable(index));
+          trh.appendChild(th);
+        });
+
+        thead.appendChild(trh);
+        table.appendChild(tbody);
+        tableEl.appendChild(table);
+
+        if (rows && rows.length > 0) {
+          populateTbody(rows);
+        } else {
+          tableEl.innerHTML = `<div class="text-gray-500 text-sm">No rows returned.</div>`;
+        }
+      } else {
+        tableEl.innerHTML = `<div class="text-gray-500 text-sm">No table data in result.</div>`;
+      }
+
+
+      // Show generated code
+      const codeEl = document.getElementById('ai-code');
+      codeEl.textContent = (plan.code && typeof plan.code === "string")
+        ? plan.code
+        : "// No code returned in data_plan.json";
+    }
+
+    // --- Utility Functions ---
+    function displayError(msg) {
+      statusContainer.innerHTML = `<div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded-lg relative" role="alert">${msg}</div>`;
+    }
+
+    function formatBytes(bytes, decimals = 2) {
+      if (!+bytes) return '0 Bytes';
+      const k = 1024, dm = decimals < 0 ? 0 : decimals;
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB'];
+      const i = Math.floor(Math.log(bytes) / Math.log(k));
+      return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
+    }
+  </script>
+</body>
+</html>
