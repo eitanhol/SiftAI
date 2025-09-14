@@ -1,0 +1,21 @@
+{
+  "name": "siftai",
+  "version": "1.0.0",
+  "description": "",
+  "homepage": "https://github.com/aarongurovich/SiftAI#readme",
+  "bugs": {
+    "url": "https://github.com/aarongurovich/SiftAI/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aarongurovich/SiftAI.git"
+  },
+  "license": "ISC",
+  "author": "",
+  "type": "commonjs",
+  "main": "chatbot.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": []
+}
