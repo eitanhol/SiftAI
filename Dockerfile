@@ -13,12 +13,16 @@ WORKDIR /app
 # Copy the Node.js project files and install dependencies
 COPY DataAnalyzer/package.json ./DataAnalyzer/
 COPY DataAnalyzer/chatbot.js ./DataAnalyzer/
+COPY DataAnalyzer/index.html ./DataAnalyzer/
+COPY DataAnalyzer/Procfile ./DataAnalyzer/
 
 # Copy the Python project files and install dependencies
 COPY DataAnalyzer/requirements.txt ./DataAnalyzer/
 COPY DataAnalyzer/main.py ./DataAnalyzer/
-COPY DataAnalyzer/Procfile ./DataAnalyzer/
-# ... copy other necessary files from DataAnalyzer/
+COPY DataAnalyzer/demo.py ./DataAnalyzer/
+COPY DataAnalyzer/runner.py ./DataAnalyzer/
+COPY DataAnalyzer/script.py ./DataAnalyzer/
+
 
 # Set the working directory to the app folder and install dependencies
 WORKDIR /app/DataAnalyzer
