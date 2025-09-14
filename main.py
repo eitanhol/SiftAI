@@ -64,10 +64,13 @@ BOOL_FALSE = {"false", "f", "0", "no", "n"}
 # Workspace management -------------------------------------------------------
 WORKSPACES: Dict[str, Path] = {}
 WS_LOCK = Lock()
+WS_BASE = Path("/tmp/workspaces")
+WS_BASE.mkdir(parents=True, exist_ok=True)
 
 def _create_workspace() -> tuple[str, Path]:
-    ws_path = Path(tempfile.mkdtemp(prefix="siftai_"))
     ws_id = uuid4().hex
+    ws_path = WS_BASE / ws_id
+    ws_path.mkdir(parents=True, exist_ok=True)
     with WS_LOCK:
         WORKSPACES[ws_id] = ws_path
     return ws_id, ws_path
@@ -88,6 +91,12 @@ def _delete_workspace(ws_id: str):
         except Exception:
             pass
 
+@app.on_event("startup")
+async def _restore_workspaces():
+    """Restore existing workspace directories from disk on startup."""
+    for path in WS_BASE.glob("*"):
+        if path.is_dir():
+            WORKSPACES[path.name] = path
 # --- Helpers (types/coercion) ----------------------------------------------
 def _looks_bool(series: pd.Series) -> bool:
     s_clean = series.dropna().astype(str).str.strip().str.lower()
